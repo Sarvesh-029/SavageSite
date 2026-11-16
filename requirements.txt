@@ -1,0 +1,9 @@
+fastapi>=0.115.6,<1
+pydantic>=2.10,<3
+playwright>=1.49,<2
+beautifulsoup4>=4.12,<5
+requests>=2.32,<3
+httpx>=0.28,<1
+pytest>=8.3,<9
+# Required to execute the async Playwright tests under pytest.
+pytest-asyncio>=0.24,<1

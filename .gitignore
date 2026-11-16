@@ -1,0 +1,13 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.env
+storage/*
+!storage/.gitkeep
+playwright-report/
+test-results/
+.DS_Store
