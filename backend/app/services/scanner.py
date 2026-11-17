@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -74,6 +75,30 @@ async def _capture(page: Page, context: BrowserContext, output: Path, width: int
     await page.set_viewport_size({"width": width, "height": height})
     await page.screenshot(path=str(output / f"{name}.png"), full_page=True, animations="disabled")
     return str(output / f"{name}.png")
+
+
+@asynccontextmanager
+async def open_page(url: str):
+    """Open a guarded page for audit checks and close its browser afterwards."""
+    await validate_url(url)
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        context = await browser.new_context(accept_downloads=False, service_workers="block")
+        initial = urlparse(url)
+        allowed_private_origin = None
+        if os.getenv("ALLOW_PRIVATE_TARGETS", "false").lower() == "true":
+            allowed_private_origin = f"{initial.scheme}://{initial.netloc}"
+        await context.route("**/*", lambda route: _guard_request(route, allowed_private_origin))
+        page = await context.new_page()
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=SCAN_TIMEOUT_MS)
+            final_validated = await validate_url(page.url)
+            final_origin = f"{urlparse(page.url).scheme}://{urlparse(page.url).netloc}"
+            if allowed_private_origin != final_origin and any(is_unsafe_ip(ip) for ip in final_validated.resolved_ips):
+                raise URLValidationError("blocked_target", "redirected target was blocked by security rules")
+            yield page
+        finally:
+            await browser.close()
 
 
 async def scan(url: str, *, audit_id: str | None = None) -> ScanResult:

@@ -1,0 +1,13 @@
+[
+  "seo-missing-title",
+  "seo-missing-meta-description",
+  "seo-multiple-h1",
+  "seo-heading-order-skip",
+  "seo-images-missing-alt",
+  "seo-missing-canonical",
+  "responsiveness-horizontal-overflow",
+  "responsiveness-wide-element",
+  "responsiveness-missing-viewport",
+  "responsiveness-tiny-mobile-text",
+  "accessibility-axe-label"
+]
