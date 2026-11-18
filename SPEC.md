@@ -5,6 +5,9 @@
 - **Performance:** PageSpeed Insights API (key in `PAGESPEED_API_KEY`). No local Lighthouse.
 - **Accessibility:** axe-core, a pinned local copy of `axe.min.js` committed under `backend/assets/`, injected via Playwright.
 - **Jobs (later phase):** FastAPI `BackgroundTasks`, status stored in DB.
+- **Phase 3 database:** SQLAlchemy 2.0 synchronous sessions, with database work dispatched through worker threads during async audits so database calls do not block Playwright's event loop. `DATABASE_URL` defaults to `sqlite:///./savagesite.db`; PostgreSQL is supported with a compatible SQLAlchemy URL/driver.
+- **Schema creation:** `Base.metadata.create_all` runs at startup for Phase 3. Alembic migrations will replace this in a later phase.
+- **Rate limiting:** the in-memory per-IP audit creation limit is per process and is not safe for multi-instance deployments.
 - **Screenshots:** saved to `storage/{audit_id}/{viewport}.png`.
 - **Environment variables:** `GEMINI_API_KEY`, `GEMINI_MODEL`, `DATABASE_URL`, `FRONTEND_URL`, `PAGESPEED_API_KEY`, and `ALLOW_PRIVATE_TARGETS` (default `false`, dev/test only).
 
@@ -54,6 +57,7 @@ The Pydantic implementation lives in `backend/app/schemas/`.
 - **Gate 0:** `SPEC.md` exists, the scaffold exists, `pip install -r requirements.txt` and `playwright install chromium` work. Stop.
 - **Gate 1:** all scanner tests pass; `scan_cli.py` works on two real public sites and produces screenshots plus metadata. Paste actual output. Stop.
 - **Gate 2:** all audit tests pass; `audit_cli.py` works on the fixture and two real sites. Paste the real output summary, unavailable categories and reasons, and any low-confidence checks. Stop.
+- **Gate 3:** deterministic scoring, SQLAlchemy persistence and the FastAPI async job API are covered by tests. Stages: `initializing`, `loading_website`, `inspecting_structure`, `analyzing_performance`, `checking_accessibility`, `evaluating_seo`, `inspecting_responsiveness`, `preparing_report`, `completed` (`generating_ai` is omitted until Phase 4).
 
 ## Residual DNS-rebinding risk
 

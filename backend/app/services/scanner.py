@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
@@ -101,7 +102,7 @@ async def open_page(url: str):
             await browser.close()
 
 
-async def scan(url: str, *, audit_id: str | None = None) -> ScanResult:
+async def scan(url: str, *, audit_id: str | None = None, progress_callback: Callable[[str], Awaitable[None]] | None = None) -> ScanResult:
     audit_id = audit_id or uuid.uuid4().hex
     try:
         await validate_url(url)
@@ -142,6 +143,8 @@ async def scan(url: str, *, audit_id: str | None = None) -> ScanResult:
 
             page.on("response", schedule_response_tracking)
             async with asyncio.timeout(TOTAL_SCAN_BUDGET_SECONDS):
+                if progress_callback:
+                    await progress_callback("loading_website")
                 response = await page.goto(url, wait_until="domcontentloaded", timeout=SCAN_TIMEOUT_MS)
                 response_status = response.status if response else None
                 final_validated = await validate_url(page.url)
@@ -162,6 +165,8 @@ async def scan(url: str, *, audit_id: str | None = None) -> ScanResult:
                     await asyncio.gather(*response_tasks, return_exceptions=True)
                 if page_bytes > MAX_PAGE_BYTES:
                     return _error_result(audit_id, url, ScanError(code="too_large", message="page exceeds the size limit"))
+                if progress_callback:
+                    await progress_callback("inspecting_structure")
                 data = await _extract(page, response_status)
                 screenshots = {
                     "desktop": await _capture(page, context, output, 1440, 900, "desktop"),
