@@ -7,12 +7,14 @@ from datetime import datetime, timezone
 
 from app.database import SessionLocal
 from app.models import Audit, AuditIssue, CategoryScoreRow
+from app.models import AuditRoast
+from app.services.ai_service import generate_roast
 from app.services.audit_engine import audit
 from app.services.scoring_service import score_findings
 from app.utils.url_validator import URLValidationError
 
 logger = logging.getLogger(__name__)
-STAGES = ["initializing", "loading_website", "inspecting_structure", "analyzing_performance", "checking_accessibility", "evaluating_seo", "inspecting_responsiveness", "preparing_report", "completed"]
+STAGES = ["initializing", "loading_website", "inspecting_structure", "analyzing_performance", "checking_accessibility", "evaluating_seo", "inspecting_responsiveness", "preparing_report", "generating_ai", "completed"]
 MAX_CONCURRENT_AUDITS = max(1, int(os.getenv("MAX_CONCURRENT_AUDITS", "2")))
 AUDIT_TIMEOUT_SECONDS = max(1, int(os.getenv("AUDIT_TIMEOUT_SECONDS", "120")))
 _semaphore = asyncio.Semaphore(MAX_CONCURRENT_AUDITS)
@@ -60,10 +62,21 @@ def _store_findings(audit_id: str, findings, scoring) -> None:
             row.issues.append(AuditIssue(issue_id=issue.id, category=issue.category, severity=issue.severity, title=issue.title, description=issue.description, evidence_json=issue.evidence, impact=issue.impact, recommendation=issue.recommendation, source=issue.source, confidence=issue.confidence))
         for category, item in scoring.categories.items():
             row.category_scores.append(CategoryScoreRow(category=category, score=item.score, status=item.status, original_weight=item.original_weight, effective_weight=item.effective_weight))
-        row.status = "completed"
-        row.stage = "completed"
-        row.stage_index = len(STAGES)
-        row.completed_at = _now()
+        row.status = "running"
+        row.stage = "generating_ai"
+        row.stage_index = STAGES.index("generating_ai") + 1
+        db.commit()
+
+
+def _finish_with_default_roast(audit_id: str) -> None:
+    with SessionLocal() as db:
+        row = db.get(Audit, audit_id)
+        if row is None:
+            return
+        status, payload, code, vision = generate_roast(row, "brutal")
+        db.add(AuditRoast(audit_id=audit_id, intensity="brutal", status=status, payload_json=payload,
+                          model=os.getenv("GEMINI_MODEL"), vision_used=vision, error_code=code))
+        row.status, row.stage, row.stage_index, row.completed_at = "completed", "completed", len(STAGES), _now()
         db.commit()
 
 
@@ -102,6 +115,7 @@ async def run_audit(audit_id: str) -> None:
                 scoring = score_findings(findings)
                 await asyncio.to_thread(_write_stage, audit_id, "preparing_report")
                 await asyncio.to_thread(_store_findings, audit_id, findings, scoring)
+                await asyncio.to_thread(_finish_with_default_roast, audit_id)
         except TimeoutError:
             await asyncio.to_thread(_fail, audit_id, "timeout", "The audit exceeded its time limit.")
         except Exception as exc:

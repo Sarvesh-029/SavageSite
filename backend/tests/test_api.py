@@ -15,7 +15,7 @@ from app.schemas.scan import ScanResult
 from app.services import audit_runner
 from app.services.scoring_service import score_findings
 from app import main
-from app.models import Audit
+from app.models import Audit, AuditRoast
 
 
 @pytest.fixture
@@ -71,6 +71,37 @@ def test_pipeline_stages_and_failure_of_one_check_completes(client, monkeypatch)
     result = c.get(f"/api/audits/{audit_id}").json()
     assert result["category_scores"]["accessibility"]["score"] is None
     assert result["excluded_categories"][0]["category"] == "accessibility"
+    assert result["roasts"]["brutal"]["status"] == "unavailable"
+    assert result["roasts"]["brutal"]["reason"] == "AI is not configured"
+
+
+def test_roast_requires_completed_audit_and_caps_regeneration(client, monkeypatch):
+    c, factory = client
+    monkeypatch.setattr(main, "run_audit", lambda _audit_id: None)
+    audit_id = c.post("/api/audits", json={"url": "https://example.com"}).json()["audit_id"]
+    assert c.post(f"/api/audits/{audit_id}/roast", json={"intensity": "mild"}).status_code == 409
+    with factory() as db:
+        row = db.get(Audit, audit_id)
+        row.status = "completed"
+        db.add(AuditRoast(audit_id=audit_id, intensity="mild", status="unavailable", error_code="ai_not_configured", regenerate_count=3))
+        db.commit()
+    response = c.post(f"/api/audits/{audit_id}/roast", json={"intensity": "mild", "regenerate": True})
+    assert response.status_code == 429
+
+
+def test_cached_roast_does_not_call_ai(client, monkeypatch):
+    c, factory = client
+    monkeypatch.setattr(main, "run_audit", lambda _audit_id: None)
+    audit_id = c.post("/api/audits", json={"url": "https://example.com"}).json()["audit_id"]
+    with factory() as db:
+        row = db.get(Audit, audit_id)
+        row.status = "completed"
+        db.add(AuditRoast(audit_id=audit_id, intensity="mild", status="available", payload_json={"output": {"final_verdict": "cached"}, "visual_observations": []}))
+        db.commit()
+    monkeypatch.setattr(main, "generate_roast", lambda *_args: pytest.fail("cache miss invoked AI"))
+    response = c.post(f"/api/audits/{audit_id}/roast", json={"intensity": "mild", "regenerate": False})
+    assert response.status_code == 200
+    assert response.json()["output"]["final_verdict"] == "cached"
 
 
 def test_screenshot_rejects_traversal_and_unknown_viewports(client):

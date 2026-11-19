@@ -15,7 +15,15 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from app.database import Base, SessionLocal, engine
-from app.models import Audit, AuditIssue
+from app.models import Audit, AuditIssue, AuditRoast
+from app.schemas.roast import Intensity
+from app.services.ai_service import generate_roast
+
+
+def _roast_reason(code: str | None) -> str | None:
+    return {"ai_not_configured": "AI is not configured", "ai_unavailable": "AI is temporarily unavailable",
+            "ai_timeout": "AI request timed out", "ai_rate_limited": "AI is rate limited",
+            "ai_invalid_output": "AI returned an invalid response"}.get(code)
 from app.services.audit_runner import STAGES, recover_orphans, run_audit
 from app.services.scanner import STORAGE_ROOT
 from app.utils.url_validator import URLValidationError, validate_url
@@ -29,6 +37,11 @@ class CreateAuditResponse(BaseModel):
     audit_id: str
     status: str
     status_url: str
+
+
+class RoastRequest(BaseModel):
+    intensity: Intensity
+    regenerate: bool = False
 
 
 class StatusError(BaseModel):
@@ -130,13 +143,43 @@ def get_audit(audit_id: str):
         if row.status != "completed":
             return _status(row)
         issues = db.scalars(select(AuditIssue).where(AuditIssue.audit_id == audit_id)).all()
+        roasts = db.scalars(select(AuditRoast).where(AuditRoast.audit_id == audit_id)).all()
         score_details = row.scoring_json or {}
         return {
             "overview": {"audit_id": row.id, "website_url": row.website_url, "final_url": row.final_url, "website_title": row.website_title, "overall_score": row.overall_score, "health_label": row.health_label, "status": row.status},
             "category_scores": score_details.get("categories", {}),
             "issues": [{"id": i.issue_id, "category": i.category, "severity": i.severity, "title": i.title, "description": i.description, "evidence": i.evidence_json, "impact": i.impact, "recommendation": i.recommendation, "source": i.source, "confidence": i.confidence} for i in issues],
             "strengths": row.strengths_json or [], "metrics": {key: value for key, value in (row.metrics_json or {}).items() if key != "_category_status"}, "excluded_categories": score_details.get("excluded_categories", []), "low_confidence": row.low_confidence,
+            "roasts": {r.intensity: {"status": r.status, "output": (r.payload_json or {}).get("output"), "visual_observations": (r.payload_json or {}).get("visual_observations", []), "error_code": r.error_code, "reason": _roast_reason(r.error_code), "vision_used": r.vision_used, "model": r.model} for r in roasts},
         }
+
+
+@app.post("/api/audits/{audit_id}/roast")
+def roast_audit(audit_id: str, body: RoastRequest):
+    audit_id = _validated_id(audit_id)
+    with SessionLocal() as db:
+        row = db.get(Audit, audit_id)
+        if not row:
+            raise HTTPException(status_code=404, detail={"code": "not_found", "message": "Audit not found."})
+        if row.status != "completed":
+            raise HTTPException(status_code=409, detail={"code": "audit_not_completed", "message": "Roasts are available after the audit completes."})
+        roast = db.scalar(select(AuditRoast).where(AuditRoast.audit_id == audit_id, AuditRoast.intensity == body.intensity))
+        if roast and not body.regenerate:
+            stored = roast.payload_json or {}
+            return {"intensity": roast.intensity, "status": roast.status, "output": stored.get("output"), "visual_observations": stored.get("visual_observations", []), "error_code": roast.error_code, "reason": _roast_reason(roast.error_code), "vision_used": roast.vision_used}
+        if roast and roast.regenerate_count >= 3:
+            raise HTTPException(status_code=429, detail={"code": "regeneration_limit", "message": "The regeneration limit has been reached."})
+        status, payload, code, vision = generate_roast(row, body.intensity)
+        if roast:
+            roast.status, roast.payload_json, roast.model, roast.vision_used, roast.error_code = status, payload, os.getenv("GEMINI_MODEL"), vision, code
+            roast.regenerate_count += 1
+        else:
+            roast = AuditRoast(audit_id=audit_id, intensity=body.intensity, status=status, payload_json=payload,
+                               model=os.getenv("GEMINI_MODEL"), vision_used=vision, error_code=code)
+            db.add(roast)
+        db.commit()
+        stored = payload or {}
+        return {"intensity": roast.intensity, "status": status, "output": stored.get("output"), "visual_observations": stored.get("visual_observations", []), "error_code": code, "reason": _roast_reason(code), "vision_used": vision}
 
 
 @app.get("/api/audits/{audit_id}/screenshots/{viewport}")
